@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grimharvest — 角色设计预览</title>
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #0d0b12;
+        color: #c8c2d8;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        display: grid;
+        place-items: center;
+      }
+      #game {
+        image-rendering: pixelated;
+        background: #14111c;
+        border: 1px solid #2a2438;
+        box-shadow: 0 0 60px #0006;
+      }
+
+      /* 升级三选一面板（DOM 覆盖层） */
+      .levelup {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: rgba(8, 6, 12, 0.6);
+        backdrop-filter: blur(2px);
+      }
+      .levelup-panel {
+        text-align: center;
+        padding: 8px;
+      }
+      .levelup-title {
+        color: #cfe8ff;
+        letter-spacing: 6px;
+        font-size: 18px;
+        margin-bottom: 18px;
+        text-shadow: 0 0 12px #6fb6ff66;
+      }
+      .levelup-cards {
+        display: flex;
+        gap: 14px;
+        justify-content: center;
+      }
+      .levelup-card {
+        position: relative;
+        width: 150px;
+        min-height: 150px;
+        padding: 18px 14px;
+        background: #1c1830;
+        border: 1px solid #3a3358;
+        border-radius: 8px;
+        color: #cfc7e0;
+        font-family: inherit;
+        cursor: pointer;
+        transition: transform 0.08s, border-color 0.08s, background 0.08s;
+      }
+      .levelup-card:hover {
+        transform: translateY(-4px);
+        border-color: #7fb6ff;
+        background: #241f3c;
+      }
+      .levelup-card.cursed {
+        border-color: #7a3a6a;
+        background: #251525;
+      }
+      .levelup-card.cursed .card-title {
+        color: #ff9ad6;
+      }
+      .levelup-card.cursed:hover {
+        border-color: #d86ab0;
+        background: #311a31;
+      }
+      .card-num {
+        position: absolute;
+        top: 8px;
+        left: 10px;
+        color: #6f6a85;
+        font-size: 12px;
+      }
+      .card-title {
+        font-size: 17px;
+        color: #eaf2ff;
+        margin: 8px 0 12px;
+      }
+      .card-desc {
+        font-size: 12px;
+        line-height: 1.6;
+        color: #9a93b4;
+      }
+      .levelup-hint {
+        margin-top: 16px;
+        color: #6f6a85;
+        font-size: 12px;
+      }
+
+      /* 命运轮盘老虎机 */
+      .slot-reels {
+        display: flex;
+        gap: 16px;
+        justify-content: center;
+      }
+      .slot-reel {
+        position: relative;
+        width: 124px;
+        min-height: 168px;
+        padding: 14px 10px;
+        background: #1c1830;
+        border: 1px solid #3a3358;
+        border-radius: 10px;
+        color: #cfc7e0;
+        font-family: inherit;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        transition: transform 0.08s, border-color 0.08s, background 0.08s, box-shadow 0.2s;
+      }
+      .slot-reel:hover {
+        transform: translateY(-4px);
+        border-color: #7fb6ff;
+        background: #241f3c;
+      }
+      .slot-reel.cursed {
+        border-color: #7a3a6a;
+        background: #251525;
+      }
+      .slot-icon {
+        width: 80px;
+        height: 80px;
+        image-rendering: pixelated;
+        background: #10121e;
+        border-radius: 8px;
+      }
+      .slot-title {
+        font-size: 14px;
+        color: #eaf2ff;
+        min-height: 18px;
+        text-align: center;
+      }
+      .slot-reel.cursed .slot-title {
+        color: #ff9ad6;
+      }
+      .slot-desc {
+        font-size: 11px;
+        line-height: 1.5;
+        color: #9a93b4;
+        text-align: center;
+      }
+      .slot-badge {
+        position: absolute;
+        top: 6px;
+        right: 9px;
+        font-size: 12px;
+        color: #ffd24a;
+      }
+      .slot-reel.match {
+        border-color: #7fb6ff;
+        box-shadow: 0 0 14px #7fb6ff66;
+      }
+      .slot-reel.jackpot {
+        border-color: #ffd24a;
+        box-shadow: 0 0 24px #ffd24aaa;
+      }
+      .slot-banner {
+        margin-top: 16px;
+        min-height: 20px;
+        font-size: 14px;
+        color: #9a93b4;
+        text-align: center;
+        opacity: 0;
+        transition: opacity 0.25s;
+      }
+      .slot-banner.show {
+        opacity: 1;
+      }
+      .slot-banner.gold {
+        color: #ffd24a;
+        text-shadow: 0 0 12px #ffd24a99;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="640" height="420"></canvas>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
