@@ -31,12 +31,14 @@ function vnoise(x, y, seed) {
   const top = a + (b - a) * sx, bot = c + (d - c) * sx;
   return top + (bot - top) * sy;
 }
-function kindAt(tx, ty, seed) {
-  if (Math.abs(tx) <= GEN.safeRadiusTiles && Math.abs(ty) <= GEN.safeRadiusTiles) return 'plain';
-  if (vnoise(tx * GEN.specialFreq, ty * GEN.specialFreq, seed ^ 0x7abcdef) > GEN.hallowed) return 'hallowed';
-  if (vnoise(tx * GEN.specialFreq, ty * GEN.specialFreq, seed ^ 0x1234567) > GEN.moonwell) return 'moonwell';
-  if (vnoise(tx * GEN.specialFreq, ty * GEN.specialFreq, seed ^ 0x5f5f5f) > GEN.ruins) return 'ruins';
-  const b = vnoise(tx * GEN.biomeFreq, ty * GEN.biomeFreq, seed);
+const TILE = 24;
+function typeAtWorld(wx, wy, seed) {
+  const safe = GEN.safeRadiusTiles * TILE, bf = GEN.biomeFreq / TILE, sf = GEN.specialFreq / TILE;
+  if (Math.abs(wx) <= safe && Math.abs(wy) <= safe) return 'plain';
+  if (vnoise(wx * sf, wy * sf, seed ^ 0x7abcdef) > GEN.hallowed) return 'hallowed';
+  if (vnoise(wx * sf, wy * sf, seed ^ 0x1234567) > GEN.moonwell) return 'moonwell';
+  if (vnoise(wx * sf, wy * sf, seed ^ 0x5f5f5f) > GEN.ruins) return 'ruins';
+  const b = vnoise(wx * bf, wy * bf, seed);
   for (const [k, max] of GEN.bands) if (b < max) return k;
   return 'plain';
 }
@@ -53,25 +55,24 @@ function encodePng(w, h, rgba) {
   return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
 }
 
-// 渲染 -90..90 格范围，每格 3px
+// 连续世界坐标采样（看有机边界）：-480..480 世界单位，每 2 单位一采样点
 const seed = 0x12345678 | 0;
-const R = 90, px = 3, W = (R * 2 + 1) * px;
+const RANGE = 480, SAMP = 2, N = (RANGE * 2) / SAMP, W = N;
 const buf = Buffer.alloc(W * W * 4);
 const counts = {};
-for (let ty = -R; ty <= R; ty++) {
-  for (let tx = -R; tx <= R; tx++) {
-    const k = kindAt(tx, ty, seed);
+for (let iy = 0; iy < N; iy++) {
+  for (let ix = 0; ix < N; ix++) {
+    const wx = -RANGE + ix * SAMP, wy = -RANGE + iy * SAMP;
+    const k = typeAtWorld(wx, wy, seed);
     counts[k] = (counts[k] || 0) + 1;
     let [r, g, b] = COLOR[k];
-    if (tx === 0 && ty === 0) { r = 255; g = 80; b = 220; } // 出生点
-    for (let yy = 0; yy < px; yy++) for (let xx = 0; xx < px; xx++) {
-      const X = (tx + R) * px + xx, Y = (ty + R) * px + yy, i = (Y * W + X) * 4;
-      buf[i] = r; buf[i + 1] = g; buf[i + 2] = b; buf[i + 3] = 255;
-    }
+    if (Math.abs(wx) < SAMP && Math.abs(wy) < SAMP) { r = 255; g = 80; b = 220; }
+    const i = (iy * W + ix) * 4;
+    buf[i] = r; buf[i + 1] = g; buf[i + 2] = b; buf[i + 3] = 255;
   }
 }
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'terrain-map.png'), encodePng(W, W, buf));
-const total = (R * 2 + 1) ** 2;
+const total = N * N;
 console.log('地形分布占比:');
 for (const k of Object.keys(COLOR)) console.log(`  ${k}: ${(((counts[k] || 0) / total) * 100).toFixed(1)}%`);

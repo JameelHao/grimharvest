@@ -1,11 +1,19 @@
 import type { Camera } from '../core/camera';
 import { TILE, CHUNK, GEN, TERRAIN, type TerrainKind, type TerrainDef } from '../data/terrain';
 
-// 地形系统：无限田野按区块确定性生成（种子 + 区块坐标），离屏预渲染 + 视野裁剪 + 缓存回收。
-// terrainAt 走纯函数 + 数值 key 查询，O(1) 零分配（架构红线）。
+// 地形系统：无限田野按「连续世界坐标」确定性生成——地形边界跟随噪声等高线，是**有机不规则块**而非方格。
+// 渲染：区块离屏预渲染（逐像素有机地表 + 特征散布），主循环只 drawImage；动画在 drawOverlay 逐帧叠加。
+// 查询 kindAt 走纯函数，零分配（架构红线）。
 
-const CHUNK_PX = CHUNK * TILE; // 区块像素边长（1 世界单位 = 1px）
+const CHUNK_PX = CHUNK * TILE;
 const CACHE_LIMIT = 32;
+const FIELD_STEP = 6; // 粗采样噪声场步长（再双线性插值到每像素，省算力）
+const FEATURE_STEP = 4; // 特征散布间距
+
+type RGB = [number, number, number];
+const BF = GEN.biomeFreq / TILE; // 转成「每世界单位」频率 → 连续
+const SF = GEN.specialFreq / TILE;
+const SAFE = GEN.safeRadiusTiles * TILE;
 
 // —— 确定性哈希值噪声 ——
 function hash2(ix: number, iy: number, seed: number): number {
@@ -29,18 +37,67 @@ function vnoise(x: number, y: number, seed: number): number {
   const bot = c + (d - c) * sx;
   return top + (bot - top) * sy;
 }
+function bilerp(f: Float32Array, o: number, g: number, fx: number, fy: number): number {
+  const a = f[o];
+  const b = f[o + 1];
+  const c = f[o + g];
+  const d = f[o + g + 1];
+  const t = a + (b - a) * fx;
+  const bt = c + (d - c) * fx;
+  return t + (bt - t) * fy;
+}
 
-// —— 区块像素绘制（写入 ImageData，一次 putImageData，避免逐像素 fillRect 卡顿）——
-type RGB = [number, number, number];
+/** 连续世界坐标 → 地形类型（不含已割状态）。组织成有机区块。 */
+function typeAtWorld(wx: number, wy: number, seed: number): TerrainKind {
+  if (wx >= -SAFE && wx <= SAFE && wy >= -SAFE && wy <= SAFE) return 'plain';
+  if (vnoise(wx * SF, wy * SF, seed ^ 0x7abcdef) > GEN.hallowed) return 'hallowed';
+  if (vnoise(wx * SF, wy * SF, seed ^ 0x1234567) > GEN.moonwell) return 'moonwell';
+  if (vnoise(wx * SF, wy * SF, seed ^ 0x5f5f5f) > GEN.ruins) return 'ruins';
+  const b = vnoise(wx * BF, wy * BF, seed);
+  for (let i = 0; i < GEN.bands.length; i++) if (b < GEN.bands[i].max) return GEN.bands[i].k;
+  return 'plain';
+}
 
-// 麦田调色（立体感：暗底层 + 前后两档明暗 + 麦穗高光）
-const EARTH: RGB = [26, 22, 12];
-const SOIL: RGB[] = [[18, 15, 8], [40, 34, 18]];
-const STALK_SHADOW: RGB = [12, 10, 5];
-const TIER = [
-  { sd: [54, 46, 22] as RGB, sm: [82, 70, 34] as RGB, sl: [110, 94, 42] as RGB, gd: [104, 84, 36] as RGB, gm: [140, 112, 48] as RGB, gl: [178, 144, 60] as RGB, gh: [200, 168, 84] as RGB },
-  { sd: [72, 60, 26] as RGB, sm: [106, 90, 40] as RGB, sl: [144, 120, 50] as RGB, gd: [138, 108, 44] as RGB, gm: [184, 148, 60] as RGB, gl: [226, 186, 76] as RGB, gh: [250, 220, 116] as RGB },
-];
+// —— 逐像素地表底色（水/沼泽/圣地带噪声纹理，其余近平色带轻微起伏）——
+function baseColorAt(kind: TerrainKind, wx: number, wy: number, seed: number): RGB {
+  switch (kind) {
+    case 'crop':
+      return [26, 22, 12];
+    case 'bog': {
+      const n = vnoise(wx * 0.16, wy * 0.16, seed ^ 0x33);
+      return n < 0.4 ? [13, 19, 14] : n > 0.62 ? [30, 36, 22] : [20, 27, 18];
+    }
+    case 'boneyard': {
+      const n = vnoise(wx * 0.12, wy * 0.12, seed ^ 0x44);
+      return n > 0.6 ? [33, 32, 38] : [29, 28, 34];
+    }
+    case 'blight': {
+      const n = vnoise(wx * 0.14, wy * 0.14, seed ^ 0x66);
+      return n > 0.62 ? [32, 18, 42] : [26, 16, 36];
+    }
+    case 'ruins':
+      return [18, 19, 25];
+    case 'hallowed': {
+      const n = vnoise(wx * 0.2, wy * 0.2, seed ^ 0x77);
+      const g = vnoise(wx * 0.045, wy * 0.045, seed ^ 0x88);
+      const c: RGB = g > 0.55 ? [50, 58, 80] : [38, 44, 60];
+      return n > 0.66 ? [62, 72, 94] : c;
+    }
+    case 'moonwell': {
+      const n = vnoise(wx * 0.13, wy * 0.13, seed ^ 0x55);
+      const n2 = vnoise(wx * 0.34 + 9, wy * 0.31 + 3, seed ^ 0xaa);
+      const wave = Math.sin(wx * 0.45 + wy * 0.28 + n * 4);
+      let c: RGB = [12, 20, 38];
+      if (n > 0.4) c = [20, 32, 56];
+      if (n > 0.58) c = [28, 46, 74];
+      if (wave > 0.5) c = [42, 66, 102];
+      if (wave > 0.82 && n2 > 0.6) c = [80, 118, 160];
+      return c;
+    }
+    default:
+      return [21, 19, 31]; // plain（占比最大，扁平底 + 草丛特征，省逐像素噪声）
+  }
+}
 
 function setPx(data: Uint8ClampedArray, dim: number, x: number, y: number, c: RGB): void {
   x |= 0;
@@ -56,222 +113,117 @@ function fillR(data: Uint8ClampedArray, dim: number, x: number, y: number, w: nu
   for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) setPx(data, dim, xx, yy, c);
 }
 
-const STALKS = 22;
-function drawWheatTile(data: Uint8ClampedArray, dim: number, ox: number, oy: number, gtx: number, gty: number, seed: number): void {
-  // 土壤底纹
-  for (let i = 0; i < 6; i++) {
-    const px = ox + Math.floor(hash2(gtx * 3 + i, gty, seed) * TILE);
-    const py = oy + Math.floor(hash2(gtx, gty * 3 + i, seed) * TILE);
-    setPx(data, dim, px, py, SOIL[hash2(i, gtx + gty, seed) > 0.5 ? 1 : 0]);
-  }
-  // 暗色底层麦草填满空隙
-  for (let i = 0; i < 10; i++) {
-    const x = ox + hash2(gtx * 31 + i, gty * 11, seed) * TILE;
-    const baseY = oy + 8 + hash2(gtx * 11, gty * 31 + i, seed) * (TILE - 8);
-    const ih = 4 + Math.round(hash2(gtx + i * 2, gty, seed) * 4);
-    for (let yy = 0; yy < ih; yy++) setPx(data, dim, x, baseY - yy, TIER[0].sd);
-  }
-  // 麦秆：按基部 y 排序，后排先画 → 前排叠上 = 景深
-  const stalks: { x: number; baseY: number; h: number; lean: number }[] = [];
-  for (let i = 0; i < STALKS; i++) {
-    stalks.push({
-      x: ox + hash2(gtx * 23 + i, gty * 7, seed) * TILE,
-      baseY: oy + 7 + hash2(gtx * 7, gty * 23 + i, seed) * (TILE - 6),
-      h: 9 + hash2(gtx + i, gty + i * 3, seed) * 9,
-      lean: (hash2(gtx * 5 + i, gty * 5 + i, seed) - 0.5) * 5,
-    });
-  }
-  stalks.sort((a, b) => a.baseY - b.baseY);
-  for (const s of stalks) {
-    const T = TIER[(s.baseY - oy) / TILE < 0.5 ? 0 : 1];
-    const ih = Math.round(s.h);
-    setPx(data, dim, s.x, s.baseY, STALK_SHADOW);
-    for (let yy = 1; yy <= ih; yy++) {
-      const t = yy / ih;
-      setPx(data, dim, s.x + s.lean * t, s.baseY - yy, t < 0.34 ? T.sd : t < 0.72 ? T.sm : T.sl);
-    }
-    const gx = s.x + s.lean;
-    const gy = s.baseY - ih;
-    setPx(data, dim, gx, gy - 1, T.gl);
-    setPx(data, dim, gx, gy, T.gm);
-    setPx(data, dim, gx, gy + 1, T.gd);
-    setPx(data, dim, gx + 1, gy - 1, T.gm);
-    setPx(data, dim, gx + 1, gy, T.gl);
-    setPx(data, dim, gx + 1, gy + 1, T.gm);
-    setPx(data, dim, gx, gy - 2, T.gh);
-  }
-}
+// 麦穗景深调色
+const STALK_SHADOW: RGB = [12, 10, 5];
+const TIER = [
+  { sd: [54, 46, 22] as RGB, sm: [82, 70, 34] as RGB, sl: [110, 94, 42] as RGB, gd: [104, 84, 36] as RGB, gm: [140, 112, 48] as RGB, gl: [178, 144, 60] as RGB, gh: [200, 168, 84] as RGB },
+  { sd: [72, 60, 26] as RGB, sm: [106, 90, 40] as RGB, sl: [144, 120, 50] as RGB, gd: [138, 108, 44] as RGB, gm: [184, 148, 60] as RGB, gl: [226, 186, 76] as RGB, gh: [250, 220, 116] as RGB },
+];
 
-// —— 各地形立体画法（与 tools/render-tiles.mjs 校对一致）——
-function drawPlain(d: Uint8ClampedArray, m: number, ox: number, oy: number, gx: number, gy: number, s: number): void {
-  fillR(d, m, ox, oy, TILE, TILE, [21, 19, 31]);
-  for (let i = 0; i < 5; i++) {
-    const x = ox + hash2(gx * 9 + i, gy * 5, s) * TILE;
-    const by = oy + 9 + hash2(gx, gy * 9 + i, s) * (TILE - 9);
-    const h = 3 + Math.round(hash2(gx + i, gy, s) * 4);
-    for (let yy = 0; yy < h; yy++) setPx(d, m, x, by - yy, yy >= h - 1 ? [60, 66, 82] : [36, 40, 52]);
+// —— 单点特征绘制（散布在对应有机区域里）——
+function drawStalk(d: Uint8ClampedArray, m: number, cx: number, by: number, seed: number): void {
+  const ix = cx | 0;
+  const iy = by | 0;
+  const T = TIER[hash2(ix, iy, seed) < 0.5 ? 0 : 1];
+  const ih = Math.round(8 + hash2(ix, iy + 3, seed) * 9);
+  const lean = (hash2(ix + 5, iy, seed) - 0.5) * 5;
+  setPx(d, m, cx, by, STALK_SHADOW);
+  for (let yy = 1; yy <= ih; yy++) {
+    const t = yy / ih;
+    setPx(d, m, cx + lean * t, by - yy, t < 0.34 ? T.sd : t < 0.72 ? T.sm : T.sl);
   }
-  for (let i = 0; i < 2; i++) {
-    const x = ox + 2 + hash2(gx * 7 + i, gy, s) * (TILE - 4);
-    const y = oy + 2 + hash2(gx, gy * 7 + i, s) * (TILE - 4);
-    fillR(d, m, x, y, 2, 2, [42, 40, 52]);
-    setPx(d, m, x, y, [60, 58, 72]);
-    setPx(d, m, x + 1, y + 1, [12, 11, 18]);
-  }
+  const gx = cx + lean;
+  const gy = by - ih;
+  setPx(d, m, gx, gy - 1, T.gl);
+  setPx(d, m, gx, gy, T.gm);
+  setPx(d, m, gx, gy + 1, T.gd);
+  setPx(d, m, gx + 1, gy - 1, T.gm);
+  setPx(d, m, gx + 1, gy, T.gl);
+  setPx(d, m, gx + 1, gy + 1, T.gm);
+  setPx(d, m, gx, gy - 2, T.gh);
 }
-function drawBog(d: Uint8ClampedArray, m: number, ox: number, oy: number, gx: number, gy: number, s: number): void {
-  // 沼泽：murky 绿水/泥 噪声底（冒泡在 drawOverlay 里逐帧叠加动画）
-  for (let yy = 0; yy < TILE; yy++) {
-    for (let xx = 0; xx < TILE; xx++) {
-      const n = vnoise((gx * TILE + xx) * 0.16, (gy * TILE + yy) * 0.16, s ^ 0x33);
-      setPx(d, m, ox + xx, oy + yy, n < 0.4 ? [13, 19, 14] : n > 0.62 ? [30, 36, 22] : [20, 27, 18]);
-    }
-  }
-  for (let i = 0; i < 5; i++) {
-    const x = ox + hash2(gx * 9 + i, gy, s) * TILE;
-    const y = oy + hash2(gx, gy * 9 + i, s) * TILE;
-    fillR(d, m, x, y, 2, 2, [44, 58, 32]);
-    setPx(d, m, x, y, [64, 84, 44]);
-  }
+function drawGrass(d: Uint8ClampedArray, m: number, x: number, y: number, seed: number): void {
+  const h = 3 + Math.round(hash2(x | 0, y | 0, seed) * 3);
+  for (let yy = 0; yy < h; yy++) setPx(d, m, x, y - yy, yy >= h - 1 ? [60, 66, 82] : [36, 40, 52]);
 }
-function drawBoneyard(d: Uint8ClampedArray, m: number, ox: number, oy: number, gx: number, gy: number, s: number): void {
-  fillR(d, m, ox, oy, TILE, TILE, [29, 28, 34]);
-  for (let i = 0; i < 3; i++) {
-    const x = ox + hash2(gx * 9 + i, gy, s) * (TILE - 6);
-    const y = oy + 4 + hash2(gx, gy * 9 + i, s) * (TILE - 6);
-    const len = 4 + Math.round(hash2(gx + i, gy, s) * 4);
-    fillR(d, m, x, y + 2, len, 1, [18, 17, 22]);
-    fillR(d, m, x, y, len, 2, [82, 78, 60]);
-    for (let k = 0; k < len; k++) setPx(d, m, x + k, y, [110, 105, 84]);
-  }
-  if (hash2(gx, gy, s) > 0.5) {
-    const x = ox + 4 + hash2(gx * 3, gy, s) * 12;
-    const y = oy + 6 + hash2(gx, gy * 3, s) * 10;
-    fillR(d, m, x, y + 4, 5, 1, [16, 15, 20]);
-    fillR(d, m, x, y, 5, 4, [92, 88, 68]);
-    for (let k = 0; k < 5; k++) setPx(d, m, x + k, y, [120, 114, 90]);
-    setPx(d, m, x + 1, y + 2, [22, 20, 24]);
-    setPx(d, m, x + 3, y + 2, [22, 20, 24]);
-  }
+function drawPebble(d: Uint8ClampedArray, m: number, x: number, y: number): void {
+  fillR(d, m, x, y, 2, 2, [42, 40, 52]);
+  setPx(d, m, x, y, [60, 58, 72]);
+  setPx(d, m, x + 1, y + 1, [12, 11, 18]);
 }
-function drawBlight(d: Uint8ClampedArray, m: number, ox: number, oy: number, gx: number, gy: number, s: number): void {
-  fillR(d, m, ox, oy, TILE, TILE, [26, 16, 36]);
-  for (let i = 0; i < 3; i++) {
-    let x = ox + hash2(gx * 9 + i, gy, s) * TILE;
-    let y = oy + hash2(gx, gy * 9 + i, s) * TILE;
-    for (let k = 0; k < 6; k++) {
-      setPx(d, m, x, y, [8, 4, 12]);
-      setPx(d, m, x + 1, y, [150, 56, 170]);
-      x += (hash2(gx + k, gy + i, s) - 0.5) * 2;
-      y += 1;
-    }
-  }
-  for (let i = 0; i < 3; i++) {
-    const x = ox + hash2(gx * 5 + i, gy * 3, s) * TILE;
-    const y = oy + hash2(gx * 3, gy * 5 + i, s) * TILE;
-    fillR(d, m, x, y, 2, 2, [58, 30, 62]);
-    setPx(d, m, x, y, [92, 52, 100]);
-    setPx(d, m, x + 1, y + 1, [14, 8, 18]);
-  }
+function drawBone(d: Uint8ClampedArray, m: number, x: number, y: number, seed: number): void {
+  const len = 4 + Math.round(hash2(x | 0, y | 0, seed) * 4);
+  fillR(d, m, x, y + 2, len, 1, [18, 17, 22]);
+  fillR(d, m, x, y, len, 2, [82, 78, 60]);
+  for (let k = 0; k < len; k++) setPx(d, m, x + k, y, [110, 105, 84]);
 }
-function drawRuins(d: Uint8ClampedArray, m: number, ox: number, oy: number, gx: number, gy: number, s: number): void {
-  // 石头山：圆润巨岩，上亮下暗 + 投影，叠成挡路岩堆
-  fillR(d, m, ox, oy, TILE, TILE, [18, 19, 25]);
-  const b: { bx: number; by: number; rad: number }[] = [];
-  for (let i = 0; i < 3; i++) {
-    b.push({
-      bx: ox + 3 + hash2(gx * 13 + i, gy * 5, s) * (TILE - 6),
-      by: oy + 3 + hash2(gx * 5, gy * 13 + i, s) * (TILE - 6),
-      rad: 4 + Math.round(hash2(gx + i, gy, s) * 4),
-    });
-  }
-  b.sort((p, q) => p.by - q.by);
-  for (const { bx, by, rad } of b) {
-    for (let xx = -rad; xx <= rad; xx++) setPx(d, m, bx + xx, by + rad + 1, [10, 10, 14]); // 投影
-    for (let yy = -rad; yy <= rad; yy++) {
-      for (let xx = -rad; xx <= rad; xx++) {
-        if (xx * xx + yy * yy > rad * rad) continue;
-        const t = (yy + rad) / (2 * rad);
-        setPx(d, m, bx + xx, by + yy, t < 0.22 ? [80, 83, 94] : t < 0.5 ? [54, 56, 65] : t < 0.78 ? [36, 37, 45] : [22, 23, 29]);
-      }
-    }
-    setPx(d, m, bx - 1, by - rad + 1, [100, 104, 116]); // 顶高光
-  }
+function drawScum(d: Uint8ClampedArray, m: number, x: number, y: number): void {
+  fillR(d, m, x, y, 2, 2, [44, 58, 32]);
+  setPx(d, m, x, y, [64, 84, 44]);
 }
-function drawHallowed(d: Uint8ClampedArray, m: number, ox: number, oy: number, gx: number, gy: number, s: number): void {
-  // 圣地：苍白大理石 + 中央柔光 + 双符文环
-  const cx = ox + TILE / 2;
-  const cy = oy + TILE / 2;
-  for (let yy = 0; yy < TILE; yy++) {
-    for (let xx = 0; xx < TILE; xx++) {
-      const n = vnoise((gx * TILE + xx) * 0.2, (gy * TILE + yy) * 0.2, s ^ 0x77);
-      const dist = Math.hypot(ox + xx - cx, oy + yy - cy);
-      let c: RGB = dist < 8 ? [54, 62, 84] : dist < 12 ? [44, 52, 72] : [34, 40, 56];
-      if (n > 0.66) c = [60, 70, 92];
-      setPx(d, m, ox + xx, oy + yy, c);
-    }
-  }
-  const rings: [number, RGB][] = [[6, [152, 184, 230]], [9, [104, 130, 176]]];
-  for (const [R, col] of rings) {
-    for (let a = 0; a < 24; a++) {
-      const ang = (a / 24) * Math.PI * 2;
-      setPx(d, m, cx + Math.cos(ang) * R, cy + Math.sin(ang) * R, col);
-    }
-  }
-  setPx(d, m, cx, cy, [184, 210, 244]);
-}
-function drawMoonwell(d: Uint8ClampedArray, m: number, ox: number, oy: number, gx: number, gy: number, s: number): void {
-  // 水：无缝纹理（用全局像素坐标，对角波纹跨格连续）
-  for (let yy = 0; yy < TILE; yy++) {
-    for (let xx = 0; xx < TILE; xx++) {
-      const wx = gx * TILE + xx;
-      const wy = gy * TILE + yy;
-      const n = vnoise(wx * 0.13, wy * 0.13, s ^ 0x55);
-      const n2 = vnoise(wx * 0.34 + 9, wy * 0.31 + 3, s ^ 0xaa);
-      const wave = Math.sin(wx * 0.45 + wy * 0.28 + n * 4);
-      let c: RGB = [12, 20, 38];
-      if (n > 0.4) c = [20, 32, 56];
-      if (n > 0.58) c = [28, 46, 74];
-      if (wave > 0.5) c = [42, 66, 102];
-      if (wave > 0.82 && n2 > 0.6) c = [80, 118, 160];
-      setPx(d, m, ox + xx, oy + yy, c);
+function drawCrust(d: Uint8ClampedArray, m: number, x: number, y: number, seed: number): void {
+  fillR(d, m, x, y, 2, 2, [58, 30, 62]);
+  setPx(d, m, x, y, [92, 52, 100]);
+  setPx(d, m, x + 1, y + 1, [14, 8, 18]);
+  if (hash2(x | 0, y | 0, seed) > 0.55) {
+    let cx = x;
+    let cy = y;
+    for (let k = 0; k < 4; k++) {
+      setPx(d, m, cx, cy, [8, 4, 12]);
+      setPx(d, m, cx + 1, cy, [150, 56, 170]);
+      cx += (hash2(cx | 0, cy | 0, seed) - 0.5) * 2;
+      cy += 1;
     }
   }
 }
-
-function paintTileData(data: Uint8ClampedArray, dim: number, lx: number, ly: number, kind: TerrainKind, gtx: number, gty: number, seed: number): void {
+function drawBoulder(d: Uint8ClampedArray, m: number, bx: number, by: number, seed: number): void {
+  const rad = 3 + Math.round(hash2(bx | 0, by | 0, seed) * 3);
+  for (let xx = -rad; xx <= rad; xx++) setPx(d, m, bx + xx, by + rad + 1, [10, 10, 14]);
+  for (let yy = -rad; yy <= rad; yy++) {
+    for (let xx = -rad; xx <= rad; xx++) {
+      if (xx * xx + yy * yy > rad * rad) continue;
+      const t = (yy + rad) / (2 * rad);
+      setPx(d, m, bx + xx, by + yy, t < 0.22 ? [80, 83, 94] : t < 0.5 ? [54, 56, 65] : t < 0.78 ? [36, 37, 45] : [22, 23, 29]);
+    }
+  }
+  setPx(d, m, bx - 1, by - rad + 1, [100, 104, 116]);
+}
+function drawSparkle(d: Uint8ClampedArray, m: number, x: number, y: number): void {
+  setPx(d, m, x, y, [184, 210, 244]);
+  setPx(d, m, x + 1, y, [120, 150, 200]);
+}
+function drawFeatureAt(d: Uint8ClampedArray, m: number, kind: TerrainKind, x: number, y: number, seed: number, h: number): void {
   switch (kind) {
     case 'crop':
-      fillR(data, dim, lx, ly, TILE, TILE, EARTH);
-      drawWheatTile(data, dim, lx, ly, gtx, gty, seed);
+      if (h < 0.82) drawStalk(d, m, x, y, seed);
       break;
-    case 'bog':
-      drawBog(data, dim, lx, ly, gtx, gty, seed);
+    case 'plain':
+      if (h < 0.04) drawGrass(d, m, x, y, seed);
+      else if (h < 0.06) drawPebble(d, m, x, y);
       break;
     case 'boneyard':
-      drawBoneyard(data, dim, lx, ly, gtx, gty, seed);
+      if (h < 0.16) drawBone(d, m, x, y, seed);
+      break;
+    case 'bog':
+      if (h < 0.14) drawScum(d, m, x, y);
       break;
     case 'blight':
-      drawBlight(data, dim, lx, ly, gtx, gty, seed);
+      if (h < 0.2) drawCrust(d, m, x, y, seed);
       break;
     case 'ruins':
-      drawRuins(data, dim, lx, ly, gtx, gty, seed);
+      if (h < 0.24) drawBoulder(d, m, x, y, seed);
       break;
     case 'hallowed':
-      drawHallowed(data, dim, lx, ly, gtx, gty, seed);
-      break;
-    case 'moonwell':
-      drawMoonwell(data, dim, lx, ly, gtx, gty, seed);
+      if (h < 0.1) drawSparkle(d, m, x, y);
       break;
     default:
-      drawPlain(data, dim, lx, ly, gtx, gty, seed);
       break;
   }
 }
 
 export class Terrain {
   private readonly seed: number;
-  private readonly harvested = new Set<number>(); // 已割麦浪格（数值 key，无分配）
+  private readonly harvested = new Set<number>();
   private readonly cache = new Map<string, HTMLCanvasElement>();
 
   constructor(seed: number) {
@@ -284,30 +236,15 @@ export class Terrain {
   }
 
   private tileKey(tx: number, ty: number): number {
-    // 24-bit 有符号偏移打包，|t| < 8M 内无碰撞，落在安全整数范围
     return (tx + 0x800000) * 0x1000000 + (ty + 0x800000);
-  }
-
-  // 基础地形（不含已割状态）
-  private baseKindAt(tx: number, ty: number): TerrainKind {
-    if (Math.abs(tx) <= GEN.safeRadiusTiles && Math.abs(ty) <= GEN.safeRadiusTiles) return 'plain';
-    if (vnoise(tx * GEN.specialFreq, ty * GEN.specialFreq, this.seed ^ 0x7abcdef) > GEN.hallowed) return 'hallowed';
-    if (vnoise(tx * GEN.specialFreq, ty * GEN.specialFreq, this.seed ^ 0x1234567) > GEN.moonwell) return 'moonwell';
-    if (vnoise(tx * GEN.specialFreq, ty * GEN.specialFreq, this.seed ^ 0x5f5f5f) > GEN.ruins) return 'ruins';
-    const b = vnoise(tx * GEN.biomeFreq, ty * GEN.biomeFreq, this.seed);
-    for (let i = 0; i < GEN.bands.length; i++) if (b < GEN.bands[i].max) return GEN.bands[i].k;
-    return 'plain';
   }
 
   /** 世界坐标 → 地形类型（已割麦浪视为 plain）。O(1) */
   kindAt(wx: number, wy: number): TerrainKind {
-    const tx = Math.floor(wx / TILE);
-    const ty = Math.floor(wy / TILE);
-    const k = this.baseKindAt(tx, ty);
-    if (k === 'crop' && this.harvested.has(this.tileKey(tx, ty))) return 'plain';
+    const k = typeAtWorld(wx, wy, this.seed);
+    if (k === 'crop' && this.harvested.has(this.tileKey(Math.floor(wx / TILE), Math.floor(wy / TILE)))) return 'plain';
     return k;
   }
-
   defAt(wx: number, wy: number): TerrainDef {
     return TERRAIN[this.kindAt(wx, wy)];
   }
@@ -321,21 +258,18 @@ export class Terrain {
     return TERRAIN[this.kindAt(wx, wy)].blocks;
   }
 
-  /** 尝试收割该点麦浪：成功返回 true（调用方掉魂），并更新缓存区块的该格渲染 */
+  /** 收割该点麦浪：成功返回 true，并把缓存区块该格重画成割后留茬 */
   tryHarvest(wx: number, wy: number): boolean {
+    if (typeAtWorld(wx, wy, this.seed) !== 'crop') return false;
     const tx = Math.floor(wx / TILE);
     const ty = Math.floor(wy / TILE);
-    if (this.baseKindAt(tx, ty) !== 'crop') return false;
     const key = this.tileKey(tx, ty);
     if (this.harvested.has(key)) return false;
     this.harvested.add(key);
-    this.repaintTile(tx, ty); // 把已缓存区块里这格改画成已割地面
+    this.repaintTile(tx, ty);
     return true;
   }
 
-  // —— 渲染 ——
-
-  // 收割后把该格重画成已割地面（plain），直接改活动区块画布的这一格
   private repaintTile(tx: number, ty: number): void {
     const cx = Math.floor(tx / CHUNK);
     const cy = Math.floor(ty / CHUNK);
@@ -345,14 +279,13 @@ export class Terrain {
     if (!ctx) return;
     const lx = (tx - cx * CHUNK) * TILE;
     const ly = (ty - cy * CHUNK) * TILE;
-    const def = TERRAIN.plain;
-    ctx.fillStyle = def.base;
+    ctx.fillStyle = '#1c1a24'; // 割后留茬地面
     ctx.fillRect(lx, ly, TILE, TILE);
-    ctx.fillStyle = def.accent;
-    for (let i = 0; i < 3; i++) {
-      const px = lx + Math.floor(hash2(tx * 3 + i, ty, this.seed) * TILE);
-      const py = ly + Math.floor(hash2(tx, ty * 3 + i, this.seed) * TILE);
-      ctx.fillRect(px, py, 1, 1);
+    ctx.fillStyle = '#3a3422';
+    for (let i = 0; i < 8; i++) {
+      const x = lx + Math.floor(hash2(tx * 3 + i, ty, this.seed) * TILE);
+      const y = ly + Math.floor(hash2(tx, ty * 3 + i, this.seed) * TILE);
+      ctx.fillRect(x, y, 1, 2);
     }
   }
 
@@ -366,21 +299,83 @@ export class Terrain {
     const ctx = canvas.getContext('2d')!;
     const img = ctx.createImageData(CHUNK_PX, CHUNK_PX);
     const data = img.data;
-    for (let ty = 0; ty < CHUNK; ty++) {
-      for (let tx = 0; tx < CHUNK; tx++) {
-        const gtx = cx * CHUNK + tx;
-        const gty = cy * CHUNK + ty;
-        let kind = this.baseKindAt(gtx, gty);
-        if (kind === 'crop' && this.harvested.has(this.tileKey(gtx, gty))) kind = 'plain';
-        paintTileData(data, CHUNK_PX, tx * TILE, ty * TILE, kind, gtx, gty, this.seed);
+    const seed = this.seed;
+    const baseX = cx * CHUNK_PX;
+    const baseY = cy * CHUNK_PX;
+
+    // 粗采样 4 个噪声场（再每像素双线性插值，避免逐像素 4 次 vnoise）
+    const G = Math.floor(CHUNK_PX / FIELD_STEP) + 2;
+    const fb = new Float32Array(G * G);
+    const fH = new Float32Array(G * G);
+    const fM = new Float32Array(G * G);
+    const fR = new Float32Array(G * G);
+    for (let gy = 0; gy < G; gy++) {
+      for (let gx = 0; gx < G; gx++) {
+        const wx = baseX + gx * FIELD_STEP;
+        const wy = baseY + gy * FIELD_STEP;
+        const o = gy * G + gx;
+        fb[o] = vnoise(wx * BF, wy * BF, seed);
+        fH[o] = vnoise(wx * SF, wy * SF, seed ^ 0x7abcdef);
+        fM[o] = vnoise(wx * SF, wy * SF, seed ^ 0x1234567);
+        fR[o] = vnoise(wx * SF, wy * SF, seed ^ 0x5f5f5f);
       }
     }
+
+    // 逐像素有机地表
+    for (let py = 0; py < CHUNK_PX; py++) {
+      for (let px = 0; px < CHUNK_PX; px++) {
+        const wx = baseX + px;
+        const wy = baseY + py;
+        let kind: TerrainKind = 'plain';
+        if (wx < -SAFE || wx > SAFE || wy < -SAFE || wy > SAFE) {
+          const gxf = px / FIELD_STEP;
+          const gyf = py / FIELD_STEP;
+          const ixx = gxf | 0;
+          const iyy = gyf | 0;
+          const fx = gxf - ixx;
+          const fy = gyf - iyy;
+          const o = iyy * G + ixx;
+          if (bilerp(fH, o, G, fx, fy) > GEN.hallowed) kind = 'hallowed';
+          else if (bilerp(fM, o, G, fx, fy) > GEN.moonwell) kind = 'moonwell';
+          else if (bilerp(fR, o, G, fx, fy) > GEN.ruins) kind = 'ruins';
+          else {
+            const b = bilerp(fb, o, G, fx, fy);
+            for (let i = 0; i < GEN.bands.length; i++) {
+              if (b < GEN.bands[i].max) {
+                kind = GEN.bands[i].k;
+                break;
+              }
+            }
+          }
+        }
+        if (kind === 'crop' && this.harvested.has(this.tileKey(Math.floor(wx / TILE), Math.floor(wy / TILE)))) kind = 'plain';
+        const c = baseColorAt(kind, wx, wy, seed);
+        const di = (py * CHUNK_PX + px) * 4;
+        data[di] = c[0];
+        data[di + 1] = c[1];
+        data[di + 2] = c[2];
+        data[di + 3] = 255;
+      }
+    }
+
+    // 特征散布（按精确类型，跟随有机区域；扫描序从上到下 → 下方覆盖上方 = 景深）
+    for (let py = 0; py < CHUNK_PX; py += FEATURE_STEP) {
+      for (let px = 0; px < CHUNK_PX; px += FEATURE_STEP) {
+        const jx = px + (hash2(px, py, seed ^ 0x111) - 0.5) * FEATURE_STEP * 1.6;
+        const jy = py + (hash2(py, px, seed ^ 0x222) - 0.5) * FEATURE_STEP * 1.6;
+        const wx = baseX + jx;
+        const wy = baseY + jy;
+        let kind = typeAtWorld(wx, wy, seed);
+        if (kind === 'crop' && this.harvested.has(this.tileKey(Math.floor(wx / TILE), Math.floor(wy / TILE)))) kind = 'plain';
+        drawFeatureAt(data, CHUNK_PX, kind, jx, jy, seed, hash2(jx | 0, jy | 0, seed ^ 0x333));
+      }
+    }
+
     ctx.putImageData(img, 0, 0);
     this.cache.set(id, canvas);
     return canvas;
   }
 
-  /** 绘制可见区块（主循环只 drawImage 区块画布） */
   draw(ctx: CanvasRenderingContext2D, cam: Camera, scale: number, viewW: number, viewH: number): void {
     const minCx = Math.floor(cam.x / CHUNK_PX);
     const maxCx = Math.floor((cam.x + viewW) / CHUNK_PX);
@@ -394,7 +389,6 @@ export class Terrain {
         ctx.drawImage(canvas, sxp, syp, CHUNK_PX * scale, CHUNK_PX * scale);
       }
     }
-    // 缓存回收：超额时清掉视野外的区块
     if (this.cache.size > CACHE_LIMIT) {
       for (const id of this.cache.keys()) {
         const [icx, icy] = id.split(',');
@@ -408,60 +402,59 @@ export class Terrain {
     }
   }
 
-  /** 逐帧动画覆盖层（沼泽冒泡 / 水面微光），画在静态地形之上、实体之下 */
+  /** 逐帧动画覆盖层（沼泽冒泡 / 水面微光），按世界网格点采样，画在地表之上、实体之下 */
   drawOverlay(ctx: CanvasRenderingContext2D, cam: Camera, scale: number, viewW: number, viewH: number, time: number): void {
-    const t0x = Math.floor(cam.x / TILE) - 1;
-    const t1x = Math.floor((cam.x + viewW) / TILE) + 1;
-    const t0y = Math.floor(cam.y / TILE) - 1;
-    const t1y = Math.floor((cam.y + viewH) / TILE) + 1;
-    for (let ty = t0y; ty <= t1y; ty++) {
-      for (let tx = t0x; tx <= t1x; tx++) {
-        const k = this.baseKindAt(tx, ty);
-        if (k === 'bog') this.drawBubbles(ctx, tx, ty, cam, scale, time);
-        else if (k === 'moonwell') this.drawGlints(ctx, tx, ty, cam, scale, time);
+    const S = 14;
+    const x0 = Math.floor(cam.x / S) * S - S;
+    const y0 = Math.floor(cam.y / S) * S - S;
+    const x1 = cam.x + viewW + S;
+    const y1 = cam.y + viewH + S;
+    for (let wy = y0; wy < y1; wy += S) {
+      for (let wx = x0; wx < x1; wx += S) {
+        const k = typeAtWorld(wx, wy, this.seed);
+        if (k === 'bog') this.bubble(ctx, wx, wy, cam, scale, time);
+        else if (k === 'moonwell') this.glint(ctx, wx, wy, cam, scale, time);
       }
     }
     ctx.globalAlpha = 1;
   }
 
-  private drawBubbles(ctx: CanvasRenderingContext2D, tx: number, ty: number, cam: Camera, scale: number, time: number): void {
-    for (let i = 0; i < 3; i++) {
-      const hx = hash2(tx * 7 + i, ty * 3, this.seed);
-      const sp = 0.35 + hash2(tx + i, ty, this.seed) * 0.45;
-      const phase = (time * sp + hx) % 1;
-      const px = (tx * TILE + 4 + hx * (TILE - 8) - cam.x) * scale;
-      const py = (ty * TILE + TILE - 3 - phase * (TILE - 7) - cam.y) * scale;
-      const r = (1 + phase * 2.2) * scale * 0.5;
-      if (phase < 0.82) {
-        ctx.globalAlpha = 0.45 + 0.35 * Math.sin(phase * Math.PI);
-        ctx.fillStyle = '#5a7e44';
-        ctx.beginPath();
-        ctx.arc(px, py, r, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#9ad078';
-        ctx.beginPath();
-        ctx.arc(px - r * 0.3, py - r * 0.3, Math.max(1, r * 0.32), 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        ctx.globalAlpha = ((1 - phase) / 0.18) * 0.55;
-        ctx.strokeStyle = '#7a9a58';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(px, py, r * 1.7, 0, Math.PI * 2);
-        ctx.stroke();
-      }
+  private bubble(ctx: CanvasRenderingContext2D, wx: number, wy: number, cam: Camera, scale: number, time: number): void {
+    const hx = hash2(wx | 0, wy | 0, this.seed);
+    const sp = 0.3 + hash2((wx | 0) + 1, wy | 0, this.seed) * 0.4;
+    const phase = (time * sp + hx) % 1;
+    const bx = wx + (hx - 0.5) * 6;
+    const by = wy - phase * 13;
+    const px = (bx - cam.x) * scale;
+    const py = (by - cam.y) * scale;
+    const r = (1 + phase * 2) * scale * 0.5;
+    if (phase < 0.82) {
+      ctx.globalAlpha = 0.4 + 0.35 * Math.sin(phase * Math.PI);
+      ctx.fillStyle = '#5a7e44';
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#9ad078';
+      ctx.beginPath();
+      ctx.arc(px - r * 0.3, py - r * 0.3, Math.max(1, r * 0.32), 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.globalAlpha = ((1 - phase) / 0.18) * 0.5;
+      ctx.strokeStyle = '#7a9a58';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(px, py, r * 1.7, 0, Math.PI * 2);
+      ctx.stroke();
     }
   }
 
-  private drawGlints(ctx: CanvasRenderingContext2D, tx: number, ty: number, cam: Camera, scale: number, time: number): void {
-    for (let i = 0; i < 2; i++) {
-      const hx = hash2(tx * 5 + i, ty, this.seed);
-      const hy = hash2(tx, ty * 5 + i, this.seed);
-      const wx = tx * TILE + hx * TILE;
-      const wy = ty * TILE + hy * TILE + Math.sin(time * 1.8 + hx * 6) * 1.5;
-      ctx.globalAlpha = 0.16 + 0.18 * (0.5 + 0.5 * Math.sin(time * 2.4 + hy * 7));
-      ctx.fillStyle = '#9fc4e8';
-      ctx.fillRect((wx - cam.x) * scale, (wy - cam.y) * scale, scale, scale);
-    }
+  private glint(ctx: CanvasRenderingContext2D, wx: number, wy: number, cam: Camera, scale: number, time: number): void {
+    const hx = hash2(wx | 0, wy | 0, this.seed);
+    const hy = hash2(wy | 0, wx | 0, this.seed);
+    const gx = wx + (hx - 0.5) * 8;
+    const gy = wy + Math.sin(time * 1.8 + hx * 6) * 1.5;
+    ctx.globalAlpha = 0.14 + 0.18 * (0.5 + 0.5 * Math.sin(time * 2.4 + hy * 7));
+    ctx.fillStyle = '#9fc4e8';
+    ctx.fillRect((gx - cam.x) * scale, (gy - cam.y) * scale, scale, scale);
   }
 }
