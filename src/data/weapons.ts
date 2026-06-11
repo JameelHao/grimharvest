@@ -3,13 +3,13 @@
 
 // 月镰 Moonscythe：起手武器，自动朝最近敌人扇形横扫，刀光为月牙
 export const MOONSCYTHE = {
-  baseDamage: 8,
-  damagePerLevel: 4,
-  cooldown: 0.85,
-  baseRange: 42,
+  baseDamage: 11,
+  damagePerLevel: 5,
+  cooldown: 0.72,
+  baseRange: 46,
   rangePerLevel: 4,
-  arc: Math.PI * 1.15, // 扇形角宽
-  knockback: 26,
+  arc: Math.PI * 1.2, // 扇形角宽
+  knockback: 28,
 };
 
 // 飞镰 CrescentThrow：飞掷的弯月，飞出去再回旋，沿途割怪（投射物）

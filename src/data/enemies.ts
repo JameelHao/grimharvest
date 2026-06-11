@@ -24,34 +24,34 @@ export interface EnemyStats {
 
 // 腐生子：基础追击杂兵
 export const HUSK_STATS: EnemyStats = {
-  kind: 'husk', behavior: 'chase', hp: 14, speed: 34, radius: 7, contactDamage: 6, corrupt: false, souls: 1,
+  kind: 'husk', behavior: 'chase', hp: 13, speed: 33, radius: 7, contactDamage: 5, corrupt: false, souls: 1,
 };
 
 // 亡者：未被收割的魂复生而来——更快更硬更痛（掉怨魂）
 export const RISEN_STATS: EnemyStats = {
-  kind: 'risen', behavior: 'chase', hp: 38, speed: 46, radius: 8, contactDamage: 12, corrupt: true, souls: 1,
+  kind: 'risen', behavior: 'chase', hp: 30, speed: 42, radius: 8, contactDamage: 9, corrupt: true, souls: 1,
 };
 
 // 冲撞者：缓慢逼近 → 蓄力 → 直线猛冲，逼你侧身闪
 export const CHARGER_STATS: EnemyStats = {
-  kind: 'charger', behavior: 'charge', hp: 48, speed: 24, radius: 9, contactDamage: 16, corrupt: false, souls: 2,
-  windup: 0.6, dashSpeed: 300, dashRange: 150, cooldown: 2.0,
+  kind: 'charger', behavior: 'charge', hp: 42, speed: 24, radius: 9, contactDamage: 12, corrupt: false, souls: 2,
+  windup: 0.65, dashSpeed: 255, dashRange: 145, cooldown: 2.2,
 };
 
 // 吐息者：保持距离，远程抛射；近身则风筝后撤
 export const SPITTER_STATS: EnemyStats = {
-  kind: 'spitter', behavior: 'spit', hp: 22, speed: 26, radius: 7, contactDamage: 8, corrupt: false, souls: 2,
-  shootRange: 175, cooldown: 1.8, projSpeed: 115, projDamage: 9,
+  kind: 'spitter', behavior: 'spit', hp: 22, speed: 26, radius: 7, contactDamage: 6, corrupt: false, souls: 2,
+  shootRange: 175, cooldown: 2.0, projSpeed: 108, projDamage: 7,
 };
 
 // 环绕者：成群结环包夹，压缩你的收割空间
 export const RINGER_STATS: EnemyStats = {
-  kind: 'ringer', behavior: 'orbit', hp: 16, speed: 86, radius: 6, contactDamage: 7, corrupt: false, souls: 1,
+  kind: 'ringer', behavior: 'orbit', hp: 16, speed: 84, radius: 6, contactDamage: 6, corrupt: false, souls: 1,
 };
 
 // 精英 · 收尸人：高血厚甲，掉一大把净魂（暴富时刻）
 export const ELITE_STATS: EnemyStats = {
-  kind: 'elite', behavior: 'chase', hp: 240, speed: 30, radius: 12, contactDamage: 18, corrupt: false, souls: 10,
+  kind: 'elite', behavior: 'chase', hp: 200, speed: 30, radius: 12, contactDamage: 14, corrupt: false, souls: 10,
 };
 
 // Boss · 镰影：终局降临，周期性召唤亡者壮大自己
