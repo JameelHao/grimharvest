@@ -147,18 +147,6 @@ function update(dt: number): void {
 }
 
 // —— 绘制辅助 ——
-function drawField(): void {
-  const TILE = 64;
-  const startX = Math.floor(camera.x / TILE) * TILE;
-  const startY = Math.floor(camera.y / TILE) * TILE;
-  for (let wy = startY; wy < camera.y + VIEW_H + TILE; wy += TILE) {
-    for (let wx = startX; wx < camera.x + VIEW_W + TILE; wx += TILE) {
-      const even = (Math.floor(wx / TILE) + Math.floor(wy / TILE)) % 2 === 0;
-      ctx.fillStyle = even ? '#171326' : '#1a1730';
-      ctx.fillRect(sx(wx), sy(wy), TILE * PIXEL_SCALE + 1, TILE * PIXEL_SCALE + 1);
-    }
-  }
-}
 
 // 弯月（两圆相减，evenodd）。dir 决定缺口朝向
 function crescentPath(cx: number, cy: number, r: number, dir: number): void {
@@ -478,7 +466,8 @@ function render(alpha: number): void {
   const shy = shk > 0 ? Math.cos(world.time * 59) * shk : 0;
   camera.centerOn(pix + shx, piy + shy);
 
-  drawField();
+  world.terrain.draw(ctx, camera, PIXEL_SCALE, VIEW_W, VIEW_H);
+  world.terrain.drawOverlay(ctx, camera, PIXEL_SCALE, VIEW_W, VIEW_H, world.time);
   drawAmbient();
   // 玩家柔光（加色混合）
   ctx.save();

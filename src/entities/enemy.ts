@@ -111,6 +111,13 @@ export class Enemy {
         break;
     }
 
+    // 地形减速 + 阻挡（统一对本帧位移缩放，覆盖所有行为）
+    const mul = world.terrain.enemySpeedMulAt(this.px, this.py);
+    this.x = this.px + (this.x - this.px) * mul;
+    this.y = this.py + (this.y - this.py) * mul;
+    if (world.terrain.blocksAt(this.x, this.py)) this.x = this.px;
+    if (world.terrain.blocksAt(this.x, this.y)) this.y = this.py;
+
     if (this.hitFlash > 0) this.hitFlash -= dt;
   }
 

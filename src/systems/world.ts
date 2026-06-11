@@ -4,6 +4,7 @@ import { Soul } from '../entities/soul';
 import { Projectile } from '../entities/projectile';
 import { EnemyShot } from '../entities/enemy-shot';
 import { Particle } from '../entities/particle';
+import { Terrain } from './terrain';
 import { SpatialHash } from '../core/spatial-hash';
 import { Rng } from '../core/rng';
 import type { Weapon } from '../weapons/weapon';
@@ -34,6 +35,7 @@ export class World {
   readonly particles: Particle[] = [];
   readonly weapons: Weapon[] = [];
   readonly rng: Rng;
+  readonly terrain: Terrain;
   shake = 0; // 屏幕震动强度（表现层读取）
 
   moonscythe = new Moonscythe();
@@ -69,6 +71,7 @@ export class World {
 
   constructor(seed: number) {
     this.rng = new Rng(seed);
+    this.terrain = new Terrain(seed);
     for (let i = 0; i < MAX_ENEMIES; i++) this.enemies.push(new Enemy());
     for (let i = 0; i < MAX_SOULS; i++) this.souls.push(new Soul());
     for (let i = 0; i < MAX_PROJECTILES; i++) this.projectiles.push(new Projectile());
@@ -86,6 +89,7 @@ export class World {
     for (let i = 0; i < this.enemyShots.length; i++) this.enemyShots[i].alive = false;
     for (let i = 0; i < this.particles.length; i++) this.particles[i].alive = false;
     this.shake = 0;
+    this.terrain.reset();
     this.moonscythe = new Moonscythe();
     this.crescent = null;
     this.familiar = null;
@@ -183,13 +187,28 @@ export class World {
 
     this.rebuildHash();
 
-    this.player.update(dt, input);
+    this.player.update(dt, input, this);
     if (this.drainPerSec > 0) {
       this.player.hp -= this.drainPerSec * dt;
       if (this.player.hp <= 0) {
         this.player.hp = 0;
         this.player.dead = true;
       }
+    }
+    // 地形：腐土掉血 / 圣地回血 / 麦浪收割
+    const td = this.terrain.defAt(this.player.x, this.player.y);
+    if (td.drainPerSec > 0) {
+      this.player.hp -= td.drainPerSec * dt;
+      if (this.player.hp <= 0) {
+        this.player.hp = 0;
+        this.player.dead = true;
+      }
+    } else if (td.healPerSec > 0 && this.player.hp < this.player.maxHp) {
+      this.player.hp = Math.min(this.player.maxHp, this.player.hp + td.healPerSec * dt);
+    }
+    if (this.terrain.tryHarvest(this.player.x, this.player.y)) {
+      this.spawnSouls(this.player.x, this.player.y, 1, false);
+      this.emitBurst(this.player.x, this.player.y, 4, 40, 0.3, 1, 210, 190, 90);
     }
 
     for (let i = 0; i < this.weapons.length; i++) this.weapons[i].update(dt, this);
@@ -421,7 +440,8 @@ export class World {
           this.collectSoul(s.fromRisen);
         }
       } else {
-        s.life -= dt;
+        // 地形影响复生快慢：枯骨地更快，圣地几乎不复生
+        s.life -= dt / this.terrain.defAt(s.x, s.y).reviveMul;
         if (s.life <= 0) {
           s.alive = false;
           this.spawnEnemy(s.x, s.y, RISEN_STATS);
@@ -511,9 +531,18 @@ export class World {
   }
 
   private spawnAtRing(stats: EnemyStats): void {
-    const a = this.rng.next() * Math.PI * 2;
-    const r = SPAWN_RADIUS + this.rng.next() * 40;
-    this.spawnEnemy(this.player.x + Math.cos(a) * r, this.player.y + Math.sin(a) * r, stats);
+    // 重试几次，避开阻挡格(残垣/月池)与不刷格(圣地)
+    for (let i = 0; i < 5; i++) {
+      const a = this.rng.next() * Math.PI * 2;
+      const r = SPAWN_RADIUS + this.rng.next() * 40;
+      const x = this.player.x + Math.cos(a) * r;
+      const y = this.player.y + Math.sin(a) * r;
+      const def = this.terrain.defAt(x, y);
+      if (!def.blocks && !def.noSpawn) {
+        this.spawnEnemy(x, y, stats);
+        return;
+      }
+    }
   }
 
   private spawnWave(): void {

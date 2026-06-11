@@ -1,4 +1,5 @@
 import type { Input } from '../core/input';
+import type { World } from '../systems/world';
 import { PLAYER_STATS } from '../data/balance';
 
 // 玩家（收割者）。x/y 为脚底落点世界坐标；px/py 为上一逻辑帧位置，供渲染插值。
@@ -21,7 +22,7 @@ export class Player {
   hurtFlash = 0; // 受击闪白剩余秒数
   dead = false;
 
-  update(dt: number, input: Input): void {
+  update(dt: number, input: Input, world: World): void {
     this.px = this.x;
     this.py = this.y;
     if (this.invuln > 0) this.invuln -= dt;
@@ -42,6 +43,13 @@ export class Player {
       this.moving = false;
       this.stepPhase = 0;
     }
+
+    // 地形减速 + 阻挡（轴分离滑动）
+    const mul = world.terrain.speedMulAt(this.px, this.py);
+    this.x = this.px + (this.x - this.px) * mul;
+    this.y = this.py + (this.y - this.py) * mul;
+    if (world.terrain.blocksAt(this.x, this.py)) this.x = this.px;
+    if (world.terrain.blocksAt(this.x, this.y)) this.y = this.py;
   }
 
   takeDamage(dmg: number): void {
