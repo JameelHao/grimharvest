@@ -3,6 +3,7 @@ import { Enemy } from '../entities/enemy';
 import { Soul } from '../entities/soul';
 import { Projectile } from '../entities/projectile';
 import { EnemyShot } from '../entities/enemy-shot';
+import { Particle } from '../entities/particle';
 import { SpatialHash } from '../core/spatial-hash';
 import { Rng } from '../core/rng';
 import type { Weapon } from '../weapons/weapon';
@@ -20,7 +21,9 @@ const MAX_ENEMIES = 1024;
 const MAX_SOULS = 1024;
 const MAX_PROJECTILES = 128;
 const MAX_SHOTS = 256;
+const MAX_PARTICLES = 512;
 const SEARCH_R = 220;
+const MAX_SHAKE = 6;
 
 export class World {
   readonly player = new Player();
@@ -28,8 +31,10 @@ export class World {
   readonly souls: Soul[] = [];
   readonly projectiles: Projectile[] = [];
   readonly enemyShots: EnemyShot[] = [];
+  readonly particles: Particle[] = [];
   readonly weapons: Weapon[] = [];
   readonly rng: Rng;
+  shake = 0; // 屏幕震动强度（表现层读取）
 
   moonscythe = new Moonscythe();
   crescent: CrescentThrow | null = null;
@@ -68,6 +73,7 @@ export class World {
     for (let i = 0; i < MAX_SOULS; i++) this.souls.push(new Soul());
     for (let i = 0; i < MAX_PROJECTILES; i++) this.projectiles.push(new Projectile());
     for (let i = 0; i < MAX_SHOTS; i++) this.enemyShots.push(new EnemyShot());
+    for (let i = 0; i < MAX_PARTICLES; i++) this.particles.push(new Particle());
     this.weapons.push(this.moonscythe);
     this.spawnRing(12, 130);
   }
@@ -78,6 +84,8 @@ export class World {
     for (let i = 0; i < this.souls.length; i++) this.souls[i].alive = false;
     for (let i = 0; i < this.projectiles.length; i++) this.projectiles[i].alive = false;
     for (let i = 0; i < this.enemyShots.length; i++) this.enemyShots[i].alive = false;
+    for (let i = 0; i < this.particles.length; i++) this.particles[i].alive = false;
+    this.shake = 0;
     this.moonscythe = new Moonscythe();
     this.crescent = null;
     this.familiar = null;
@@ -195,10 +203,12 @@ export class World {
       const dx = this.player.x - e.x;
       const dy = this.player.y - e.y;
       const rr = this.player.radius + e.radius;
-      if (dx * dx + dy * dy < rr * rr) this.player.takeDamage(e.contactDamage);
+      if (dx * dx + dy * dy < rr * rr) this.hurtPlayer(e.contactDamage);
     }
 
     this.updateSouls(dt);
+    this.updateParticles(dt);
+    if (this.shake > 0) this.shake = Math.max(0, this.shake - dt * 26);
   }
 
   // —— 战斗查询（供武器调用）——
@@ -275,6 +285,7 @@ export class World {
 
   /** Boss 召唤：在 (x,y) 周围生成 n 个亡者 */
   summonRisen(x: number, y: number, n: number): void {
+    this.shake = Math.min(MAX_SHAKE, this.shake + 3);
     for (let i = 0; i < n; i++) {
       const a = this.rng.next() * Math.PI * 2;
       const r = 26 + this.rng.next() * 18;
@@ -294,9 +305,47 @@ export class World {
     this.kills++;
     this.dread = Math.min(DREAD.max, this.dread + DREAD.perKill);
     this.spawnSouls(e.x, e.y, e.souls, e.corrupt);
+    // 死亡碎屑
+    const big = e.type === 'boss' || e.type === 'elite';
+    if (e.corrupt) this.emitBurst(e.x, e.y, 8, 64, 0.5, 2, 200, 130, 255);
+    else if (big) this.emitBurst(e.x, e.y, 18, 100, 0.65, 3, 240, 210, 130);
+    else this.emitBurst(e.x, e.y, 7, 58, 0.45, 2, 170, 205, 150);
     if (e === this.boss) {
       this.boss = null;
       this.won = true;
+      this.shake = MAX_SHAKE;
+    }
+  }
+
+  private hurtPlayer(dmg: number): void {
+    const before = this.player.hp;
+    this.player.takeDamage(dmg);
+    if (this.player.hp < before) {
+      this.shake = Math.min(MAX_SHAKE, this.shake + 2.5);
+      this.emitBurst(this.player.x, this.player.y, 5, 70, 0.35, 2, 235, 90, 90);
+    }
+  }
+
+  private emitBurst(x: number, y: number, n: number, speed: number, life: number, size: number, r: number, g: number, b: number): void {
+    for (let i = 0; i < n; i++) {
+      let slot = -1;
+      for (let j = 0; j < this.particles.length; j++) {
+        if (!this.particles[j].alive) {
+          slot = j;
+          break;
+        }
+      }
+      if (slot < 0) return;
+      const a = this.rng.next() * Math.PI * 2;
+      const sp = speed * (0.4 + this.rng.next() * 0.6);
+      this.particles[slot].spawn(x, y, Math.cos(a) * sp, Math.sin(a) * sp, life * (0.6 + this.rng.next() * 0.5), size, r, g, b);
+    }
+  }
+
+  private updateParticles(dt: number): void {
+    for (let i = 0; i < this.particles.length; i++) {
+      const p = this.particles[i];
+      if (p.alive) p.update(dt);
     }
   }
 
@@ -342,7 +391,7 @@ export class World {
       const dy = p.y - sh.y;
       const rr = p.radius + sh.radius;
       if (dx * dx + dy * dy < rr * rr) {
-        p.takeDamage(sh.damage);
+        this.hurtPlayer(sh.damage);
         sh.alive = false;
       } else if (sh.life <= 0) {
         sh.alive = false;

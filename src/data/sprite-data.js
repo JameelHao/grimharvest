@@ -456,14 +456,58 @@ export const ELITE = {
   },
 };
 
-// Boss · 镰影：收割者的暗黑巨大镜像——近黑长袍 + 幽光双眼
+// Boss · 镰影：漂浮的骷髅死灵——骨脸空洞 + 幽蓝双眼 + 胸口月牙印记 + 无腿飘散下摆。
+// 与主角(有腿有靴的旅人)剪影完全不同。
 export const BOSS = {
-  name: 'boss', w: PLAYER.w, h: PLAYER.h, anchor: PLAYER.anchor, rows: PLAYER.rows,
+  name: 'boss', w: 20, h: 26, anchor: { x: 10, y: 22 },
   palette: {
-    K: '#08080e', d: '#14121e', c: '#1f1c2c', h: '#322c46', f: '#5a5468', g: '#403a4e',
-    e: '#9ff0d8', r: '#3a1020', R: '#5a1a2e', l: '#221812', L: '#322318', m: '#5a5a66',
+    K: '#070710', d: '#13111e', c: '#201d30', n: '#cfc6b0', o: '#04040a', e: '#9ff0d8', m: '#7fe0c8',
   },
+  rows: [
+    '.......KKKKKK.......',
+    '.....KKddddddKK.....',
+    '....KddccccccddK....',
+    '...KddccccccccddK...',
+    '...KdcnnnnnnnncdK...',
+    '...KdcnoenneoncdK...',
+    '...KdcnnnoonnncdK...',
+    '...KdcnnssssnncdK...',
+    '...KddnnnnnnnnddK...',
+    '..KKdccccccccccdKK..',
+    '.KnnKccccccccccKnnK.',
+    '.KnnKcccmmmmcccKnnK.',
+    '..KdcccmmmmmmcccdK..',
+    '..KdccccmmmmccccdK..',
+    '..KdccccccccccccdK..',
+    '..KdccccccccccccdK..',
+    '.KdccccccccccccccdK.',
+    '.KdccddccccccddccdK.',
+    '.KdccccccccccccccdK.',
+    'KdccccccccccccccccdK',
+    'KdccccccccccccccccdK',
+    'KdcKcccKcccKcccKccdK',
+    '.KK.KcK.KcK.KcK.KK..',
+    '..K..K...K...K..K...',
+    '...................',
+    '...................',
+  ],
 };
+
+// 主角行走两帧（复用上半身，只换腿：A 叉开 / B 并拢，配合上下浮动形成迈步）
+const WALK_A_LEGS = [
+  '......KLlK....KlLK......',
+  '......KllK....KllK......',
+  '......KLLK....KLLK......',
+  '......KLLK....KLLK......',
+];
+const WALK_B_LEGS = [
+  '.......KLlKKlLK.........',
+  '.......KllKKllK.........',
+  '.......KLLKKLLK.........',
+  '.......KLLKKLLK.........',
+];
+export const PLAYER_WALK_A = { ...PLAYER, name: 'reaper-walk-a', rows: [...PLAYER.rows.slice(0, 24), ...WALK_A_LEGS] };
+export const PLAYER_WALK_B = { ...PLAYER, name: 'reaper-walk-b', rows: [...PLAYER.rows.slice(0, 24), ...WALK_B_LEGS] };
 
 export const SPRITES = {
   reaper: PLAYER, husk: HUSK, 'bat-a': BAT_A, 'bat-b': BAT_B,

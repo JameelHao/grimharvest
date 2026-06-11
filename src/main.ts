@@ -1,7 +1,7 @@
 // 入口：M3 魂收割 + 升级 + 三武器。组装 World（逻辑）+ 渲染（离屏精灵 + Canvas）。
 // 机制蓝图见 docs/DESIGN.md。WASD 移动；月镰自动横扫；吸魂升级三选一(月镰/飞镰/使魔)；
 // 没吸到的魂会就地复生成亡者。被围死按 R 重开。
-import { PLAYER, HUSK, BAT_A, BAT_B, CHARGER, SPITTER, RINGER, ELITE, BOSS } from './data/sprite-data.js';
+import { PLAYER, HUSK, BAT_A, BAT_B, CHARGER, SPITTER, RINGER, ELITE, BOSS, PLAYER_WALK_A, PLAYER_WALK_B } from './data/sprite-data.js';
 import { prerenderSprite, prerenderSilhouette, drawSprite, type Sprite } from './core/sprite';
 import { startLoop } from './core/loop';
 import { Input } from './core/input';
@@ -23,6 +23,8 @@ const VIEW_W = canvas.width / PIXEL_SCALE;
 const VIEW_H = canvas.height / PIXEL_SCALE;
 
 const reaperSprite = prerenderSprite(PLAYER);
+const reaperWalkA = prerenderSprite(PLAYER_WALK_A); // 行走帧
+const reaperWalkB = prerenderSprite(PLAYER_WALK_B);
 const huskSprite = prerenderSprite(HUSK);
 const reaperFlash = prerenderSilhouette(PLAYER, '#ffffff');
 const huskFlash = prerenderSilhouette(HUSK, '#ffffff');
@@ -45,8 +47,37 @@ const ENEMY_SPR: Record<EnemyKind, EnemyArt> = {
   spitter: { spr: prerenderSprite(SPITTER), flash: prerenderSilhouette(SPITTER, '#ffffff'), scale: 3 },
   ringer: { spr: prerenderSprite(RINGER), flash: prerenderSilhouette(RINGER, '#ffffff'), scale: 3 },
   elite: { spr: prerenderSprite(ELITE), flash: prerenderSilhouette(ELITE, '#ffffff'), scale: 3 },
-  boss: { spr: prerenderSprite(BOSS), flash: prerenderSilhouette(BOSS, '#ffffff'), scale: 5 },
+  boss: { spr: prerenderSprite(BOSS), flash: prerenderSilhouette(BOSS, '#ffffff'), scale: 6 },
 };
+
+// 玩家柔光 + 暗角（离屏预渲染一次，主循环只 drawImage）
+const GLOW_R = 80;
+const playerGlow = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = GLOW_R * 2;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(GLOW_R, GLOW_R, 0, GLOW_R, GLOW_R, GLOW_R);
+  grad.addColorStop(0, 'rgba(130,200,230,0.32)');
+  grad.addColorStop(1, 'rgba(130,200,230,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, GLOW_R * 2, GLOW_R * 2);
+  return c;
+})();
+const vignette = (() => {
+  const c = document.createElement('canvas');
+  c.width = canvas.width;
+  c.height = canvas.height;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(
+    canvas.width / 2, canvas.height / 2, canvas.height * 0.32,
+    canvas.width / 2, canvas.height / 2, canvas.width * 0.72,
+  );
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  return c;
+})();
 
 const input = new Input();
 const camera = new Camera(VIEW_W, VIEW_H);
@@ -199,31 +230,53 @@ function drawFamiliars(alpha: number): void {
   }
 }
 
-// 月牙刀光：以玩家躯干为中心画弯月带扇形
+// 月牙刀光：沿挥砍扇形画一道「弯月」——两端收成尖、中间最宽的月牙形。
 function drawMoonSlash(): void {
   const ms = world.moonscythe;
   if (!ms.swingActive) return;
   const cx = canvas.width / 2;
   const cy = canvas.height / 2 - 12 * PIXEL_SCALE;
-  const a = ms.swingT / ms.swingDur; // 1 → 0
+  const prog = ms.swingT / ms.swingDur; // 1 → 0
   const R = ms.range * PIXEL_SCALE;
-  const r = R * 0.6;
   const a0 = ms.swingAngle - MOONSCYTHE.arc / 2;
   const a1 = ms.swingAngle + MOONSCYTHE.arc / 2;
+  const N = 18;
+  const maxW = R * 0.5; // 月牙最宽处
   ctx.save();
-  ctx.globalAlpha = a * 0.85;
-  ctx.shadowBlur = 12;
-  ctx.shadowColor = '#cfe8ff';
-  ctx.fillStyle = '#bcdcff';
+  ctx.shadowBlur = 14;
+  ctx.shadowColor = '#bfe6ff';
+  ctx.globalAlpha = prog * 0.9;
+  ctx.fillStyle = '#c4e2ff';
   ctx.beginPath();
-  ctx.arc(cx, cy, R, a0, a1);
-  ctx.arc(cx, cy, r, a1, a0, true);
+  // 外缘 a0 → a1（半径 R）
+  for (let i = 0; i <= N; i++) {
+    const a = a0 + ((a1 - a0) * i) / N;
+    const px = cx + Math.cos(a) * R;
+    const py = cy + Math.sin(a) * R;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  // 内缘 a1 → a0（半径随位置收窄，两端归零 = 月牙尖角）
+  for (let i = N; i >= 0; i--) {
+    const t = i / N;
+    const w = maxW * Math.sin(t * Math.PI);
+    const a = a0 + (a1 - a0) * t;
+    ctx.lineTo(cx + Math.cos(a) * (R - w), cy + Math.sin(a) * (R - w));
+  }
   ctx.closePath();
   ctx.fill();
+  // 外缘亮边
+  ctx.globalAlpha = prog;
   ctx.strokeStyle = '#eaf6ff';
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.arc(cx, cy, R, a0, a1);
+  for (let i = 0; i <= N; i++) {
+    const a = a0 + ((a1 - a0) * i) / N;
+    const px = cx + Math.cos(a) * R;
+    const py = cy + Math.sin(a) * R;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
   ctx.stroke();
   ctx.restore();
 }
@@ -323,6 +376,34 @@ function drawGameOver(): void {
   ctx.fillText('按 R 重新开始', canvas.width / 2, canvas.height / 2 + 48);
 }
 
+// 漂浮的尘埃/萤火，向上缓缓飘动，营造夜色氛围
+function drawAmbient(): void {
+  ctx.save();
+  ctx.globalAlpha = 0.22;
+  ctx.fillStyle = '#7a8aac';
+  for (let i = 0; i < 28; i++) {
+    const seed = i * 97.3;
+    const x = ((Math.sin(seed) * 0.5 + 0.5) * canvas.width + Math.sin(world.time * 0.25 + seed) * 18) % canvas.width;
+    let y = (Math.cos(seed) * 0.5 + 0.5) * canvas.height - world.time * 8 - seed * 13;
+    y = ((y % canvas.height) + canvas.height) % canvas.height;
+    ctx.fillRect(x, y, 2, 2);
+  }
+  ctx.restore();
+}
+
+function drawParticles(): void {
+  for (let i = 0; i < world.particles.length; i++) {
+    const p = world.particles[i];
+    if (!p.alive) continue;
+    const k = p.life / p.maxLife; // 1 → 0
+    const s = Math.max(1, p.size * PIXEL_SCALE * k);
+    ctx.globalAlpha = Math.min(1, k);
+    ctx.fillStyle = `rgb(${p.r},${p.g},${p.b})`;
+    ctx.fillRect(sx(p.x) - s / 2, sy(p.y) - s / 2, s, s);
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawEnemyShots(alpha: number): void {
   for (let i = 0; i < world.enemyShots.length; i++) {
     const sh = world.enemyShots[i];
@@ -391,9 +472,19 @@ function render(alpha: number): void {
 
   const pix = player.px + (player.x - player.px) * alpha;
   const piy = player.py + (player.y - player.py) * alpha;
-  camera.centerOn(pix, piy);
+  // 屏幕震动（确定性，不用随机）
+  const shk = world.shake;
+  const shx = shk > 0 ? Math.sin(world.time * 47) * shk : 0;
+  const shy = shk > 0 ? Math.cos(world.time * 59) * shk : 0;
+  camera.centerOn(pix + shx, piy + shy);
 
   drawField();
+  drawAmbient();
+  // 玩家柔光（加色混合）
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(playerGlow, sx(pix) - GLOW_R, sy(piy) - 12 * PIXEL_SCALE - GLOW_R);
+  ctx.restore();
   drawSouls(alpha);
 
   // 实体按脚底 Y 排序
@@ -419,8 +510,10 @@ function render(alpha: number): void {
 
     if (m.kind === 'player') {
       const bob = m.moving ? Math.abs(Math.sin(m.stepPhase)) * -2 * PIXEL_SCALE : 0;
+      // 行走时左右迈步两帧切换，站立用基础帧
+      const frame = m.moving ? (Math.sin(m.stepPhase) > 0 ? reaperWalkA : reaperWalkB) : reaperSprite;
       ctx.globalAlpha = m.invuln > 0 ? 0.55 : 1;
-      drawSprite(ctx, reaperSprite, x, y + bob, PIXEL_SCALE, m.facing < 0);
+      drawSprite(ctx, frame, x, y + bob, PIXEL_SCALE, m.facing < 0);
       ctx.globalAlpha = 1;
       if (m.hurtFlash > 0) {
         ctx.globalAlpha = (m.hurtFlash / 0.15) * 0.85;
@@ -451,10 +544,13 @@ function render(alpha: number): void {
     }
   }
 
+  drawParticles();
   drawEnemyShots(alpha);
   drawProjectiles(alpha);
   drawFamiliars(alpha);
   drawMoonSlash();
+
+  ctx.drawImage(vignette, 0, 0); // 暗角
 
   drawHud();
   if (world.bossActive()) drawBossBar();

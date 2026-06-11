@@ -4,7 +4,7 @@ import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { PLAYER, HUSK, BAT_A, BAT_B, ICON_LIST, CHARGER, SPITTER, RINGER, ELITE, BOSS } from '../src/data/sprite-data.js';
+import { PLAYER, HUSK, BAT_A, BAT_B, ICON_LIST, CHARGER, SPITTER, RINGER, ELITE, BOSS, PLAYER_WALK_A, PLAYER_WALK_B } from '../src/data/sprite-data.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = join(here, '..', 'assets', 'preview');
@@ -151,6 +151,25 @@ for (const def of [PLAYER, HUSK, BAT_A, BAT_B]) {
     drawSprite(img, def, cx, cy, scale, null);
   });
   writeFileSync(join(outDir, 'icons.png'), encodePng(img.w, img.h, img.buf));
+}
+
+// 主角动作三帧 + Boss 单独大图
+{
+  const scale = 8;
+  const pad = 16;
+  const gap = 18;
+  const list = [PLAYER, PLAYER_WALK_A, PLAYER_WALK_B, BOSS];
+  const maxH = Math.max(...list.map((dd) => dd.h)) * scale;
+  let totalW = pad * 2 + gap * (list.length - 1);
+  for (const dd of list) totalW += dd.w * scale;
+  const img = makeImage(totalW, maxH + pad * 2, '#161320');
+  fillRect(img, 0, pad + maxH, totalW, 1, 40, 34, 52);
+  let cx2 = pad;
+  for (const dd of list) {
+    drawSprite(img, dd, cx2, pad + (maxH - dd.h * scale), scale, null);
+    cx2 += dd.w * scale + gap;
+  }
+  writeFileSync(join(outDir, 'actors.png'), encodePng(img.w, img.h, img.buf));
 }
 
 // 敌人对照表（按真实相对比例并排）

@@ -18,6 +18,8 @@ export const PLAYER: SpriteDef;
 export const HUSK: SpriteDef;
 export const BAT_A: SpriteDef;
 export const BAT_B: SpriteDef;
+export const PLAYER_WALK_A: SpriteDef;
+export const PLAYER_WALK_B: SpriteDef;
 export const CHARGER: SpriteDef;
 export const SPITTER: SpriteDef;
 export const RINGER: SpriteDef;
